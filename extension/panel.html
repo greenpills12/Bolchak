@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Bolchak</title>
+<style>
+  body { font: 13px system-ui, sans-serif; margin: 10px; color: #222; }
+  label { display: block; margin-top: 8px; font-weight: 600; }
+  textarea, input, select { width: 100%; box-sizing: border-box; font: inherit; padding: 4px; }
+  textarea { resize: vertical; }
+  .row { display: flex; gap: 6px; } .row > * { flex: 1; }
+  button { margin-top: 8px; padding: 6px; cursor: pointer; }
+  #status { margin-top: 8px; padding: 6px; background: #f2f2f2; border-radius: 4px; }
+  #log { margin-top: 8px; max-height: 45vh; overflow: auto; border: 1px solid #ddd; border-radius: 4px; }
+  .msg { padding: 6px; border-bottom: 1px solid #eee; white-space: pre-wrap; }
+  .msg b { display: block; }
+  .chatgpt b { color: #10a37f; } .deepseek b { color: #4d6bfe; }
+  details summary { cursor: pointer; margin-top: 8px; font-weight: 600; }
+</style>
+</head>
+<body>
+  <h3 style="margin:0">Bolchak — AI ↔ AI Debate</h3>
+  <small>Open chatgpt.com and chat.deepseek.com (logged in) in tabs, ideally in separate windows.</small>
+
+  <label>Topic / question</label>
+  <textarea id="topic" rows="3" placeholder="e.g. Prove or disprove: every bounded monotone sequence converges"></textarea>
+
+  <div class="row">
+    <div><label>Starts</label><select id="first"><option value="chatgpt">ChatGPT</option><option value="deepseek">DeepSeek</option></select></div>
+    <div><label>Max turns</label><input id="maxTurns" type="number" value="8" min="1"></div>
+    <div><label>Timeout (s)</label><input id="timeout" type="number" value="300" min="30"></div>
+  </div>
+
+  <details>
+    <summary>System prompts (optional)</summary>
+    <label>Opening prompt (sent with the topic, first turn only)</label>
+    <textarea id="opening" rows="4"></textarea>
+    <label>Prefix (inserted at START of each relayed answer)</label>
+    <textarea id="prefix" rows="4"></textarea>
+    <label>Suffix (inserted at END of each relayed answer)</label>
+    <textarea id="suffix" rows="4"></textarea>
+    <label>Conclusion marker</label>
+    <input id="marker">
+    <button id="reset">Reset prompts to defaults</button>
+  </details>
+
+  <div class="row">
+    <button id="start">▶ Start</button>
+    <button id="stop" disabled>■ Stop</button>
+    <button id="export">⬇ Export .md</button>
+  </div>
+  <div id="status">Idle</div>
+  <div id="log"></div>
+  <script src="panel.js"></script>
+</body>
+</html>
