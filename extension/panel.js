@@ -100,3 +100,50 @@ $('export').onclick = () => {
   chrome.downloads ? chrome.downloads.download({ url, filename: 'bolchak-debate.md' })
     : Object.assign(document.createElement('a'), { href: url, download: 'bolchak-debate.md' }).click();
 };
+
+// ---- Custom element picker UI ----
+const ROLES = { input: 'Paste box', send: 'Send btn', stop: 'Stop btn', answers: 'Copy from' };
+function buildPickers() {
+  const root = $('pickers'); root.innerHTML = '';
+  for (const ai of ['chatgpt', 'deepseek']) {
+    const box = document.createElement('div'); box.className = 'pk';
+    box.innerHTML = `<b>${NAMES[ai]}</b> <button data-test="${ai}" style="float:right;margin:0;padding:2px 6px">Test</button>`;
+    for (const role in ROLES) {
+      const r = document.createElement('div'); r.className = 'r';
+      r.innerHTML = `<span>${ROLES[role]}</span><input data-ai="${ai}" data-role="${role}" placeholder="auto">` +
+        `<button data-pick="${ai}:${role}">Pick</button><button data-clear="${ai}:${role}">✕</button>`;
+      box.append(r);
+    }
+    root.append(box);
+  }
+  chrome.storage.local.get(['custom_chatgpt', 'custom_deepseek'], (s) => {
+    root.querySelectorAll('input').forEach((i) => (i.value = s['custom_' + i.dataset.ai]?.[i.dataset.role] || ''));
+  });
+}
+async function saveRole(ai, role, value) {
+  const key = 'custom_' + ai, cur = (await chrome.storage.local.get(key))[key] || {};
+  if (value) cur[role] = value; else delete cur[role];
+  await chrome.storage.local.set({ [key]: cur });
+}
+$('pickers').addEventListener('change', (e) => { const i = e.target; if (i.dataset.role) saveRole(i.dataset.ai, i.dataset.role, i.value.trim()); });
+$('pickers').addEventListener('click', async (e) => {
+  const b = e.target;
+  try {
+    if (b.dataset.clear) { const [ai, role] = b.dataset.clear.split(':'); await saveRole(ai, role, ''); buildPickers(); }
+    if (b.dataset.pick) {
+      const [ai, role] = b.dataset.pick.split(':');
+      const tabId = await findTab(ai);
+      const tab = await chrome.tabs.get(tabId);
+      await chrome.windows.update(tab.windowId, { focused: true }); await chrome.tabs.update(tabId, { active: true });
+      status(`Click the ${ROLES[role]} in the ${NAMES[ai]} tab (Esc cancels)…`);
+      const r = await chrome.tabs.sendMessage(tabId, { type: 'pick', role });
+      status(r.ok ? `Saved ${NAMES[ai]} ${ROLES[role]}: ${r.selector} (matches ${r.count})` : 'Pick cancelled.');
+      buildPickers();
+    }
+    if (b.dataset.test) {
+      const r = await chrome.tabs.sendMessage(await findTab(b.dataset.test), { type: 'test' });
+      status(`${NAMES[b.dataset.test]}: paste box ${r.input ? '✓' : '✗'}, send ${r.send ? '✓' : '✗'}, stop ${r.stop ? '✓ (generating)' : '– (idle)'}, replies found: ${r.answers}`);
+    }
+  } catch (err) { status('Error: ' + err.message); }
+});
+buildPickers();

@@ -27,13 +27,21 @@
 
   const site = location.hostname.includes('deepseek') ? 'deepseek' : 'chatgpt';
   const cfg = SITES[site];
+  // User-picked selectors (from the side panel "Pick" buttons) override defaults.
+  let custom = {};
+  const loadCustom = () => chrome.storage.local.get('custom_' + site, (r) => { custom = r['custom_' + site] || {}; });
+  loadCustom();
+  chrome.storage.onChanged.addListener((c) => { if (c['custom_' + site]) loadCustom(); });
+  const sel = (role) => (custom[role] ? [custom[role], ...cfg[role]] : cfg[role]);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const q = (list) => { for (const s of list) { try { const el = document.querySelector(s); if (el) return el; } catch {} } return null; };
   const visible = (el) => el && el.offsetParent !== null;
 
   function answerNodes() {
-    let nodes = [...document.querySelectorAll(cfg.answers)];
-    if (cfg.exclude) nodes = nodes.filter((n) => !n.closest(cfg.exclude));
+    let nodes = [];
+    if (custom.answers) { try { nodes = [...document.querySelectorAll(custom.answers)]; } catch {} }
+    if (!nodes.length) nodes = [...document.querySelectorAll(cfg.answers)];
+    if (cfg.exclude && !custom.answers) nodes = nodes.filter((n) => !n.closest(cfg.exclude));
     // Drop nested matches (keep outermost)
     nodes = nodes.filter((n) => !nodes.some((o) => o !== n && o.contains(n)));
     return nodes;
@@ -42,12 +50,12 @@
     const nodes = answerNodes();
     const n = nodes[nodes.length - 1];
     if (!n) return null;
-    return (cfg.answerBody && n.querySelector(cfg.answerBody)) || n;
+    return (!custom.answers && cfg.answerBody && n.querySelector(cfg.answerBody)) || n;
   }
 
   // ---------- 1. INSERT ----------
   async function insertText(text) {
-    const el = q(cfg.input);
+    const el = q(sel('input'));
     if (!el) throw new Error('Input box not found');
     el.focus();
     if (el.tagName === 'TEXTAREA') {
@@ -70,12 +78,12 @@
   // ---------- 2. SEND ----------
   async function send() {
     for (let i = 0; i < 20; i++) {
-      const btn = q(cfg.send);
+      const btn = q(sel('send'));
       if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') { btn.click(); return; }
       await sleep(250);
     }
     // Fallback: press Enter in the input
-    const el = q(cfg.input);
+    const el = q(sel('input'));
     el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
   }
 
@@ -93,7 +101,7 @@
     let last = '', stableSince = Date.now();
     while (Date.now() - start < timeoutMs) {
       const t = lastAnswer()?.innerText || '';
-      const generating = visible(q(cfg.stop));
+      const generating = visible(q(sel('stop')));
       if (t !== last) { last = t; stableSince = Date.now(); }
       if (!generating && t && Date.now() - stableSince > 3000) break;
       await sleep(700);
@@ -159,9 +167,73 @@
     return walk(root);
   }
 
+  // ---------- Element picker ----------
+  const stableClasses = (el) => [...el.classList].filter((c) => /^[a-zA-Z][\w-]*$/.test(c) && !/^(hover|active|focus|selected|open)/.test(c)).slice(0, 3);
+  function selectorFor(el, role) {
+    const esc = CSS.escape;
+    if (role !== 'answers') {
+      if (el.id && !/\d{3,}/.test(el.id)) return '#' + esc(el.id);
+      for (const a of ['data-testid', 'aria-label', 'name', 'placeholder']) {
+        const v = el.getAttribute(a);
+        if (v) { const s = `${el.tagName.toLowerCase()}[${a}="${CSS.escape(v)}"]`; if (document.querySelectorAll(s).length === 1) return s; }
+      }
+    } else {
+      for (const a of ['data-message-author-role', 'data-testid']) {
+        const v = el.getAttribute(a); if (v) return `[${a}="${CSS.escape(v)}"]`;
+      }
+    }
+    // Build a class-based path (no nth-child for answers so it matches every reply)
+    const parts = []; let cur = el;
+    for (let d = 0; cur && cur !== document.body && d < 4; d++, cur = cur.parentElement) {
+      let part = cur.tagName.toLowerCase();
+      const cls = stableClasses(cur); if (cls.length) part += '.' + cls.map(esc).join('.');
+      if (role !== 'answers' && cur.parentElement) {
+        const same = [...cur.parentElement.children].filter((c) => c.tagName === cur.tagName);
+        if (same.length > 1) part += `:nth-of-type(${same.indexOf(cur) + 1})`;
+      }
+      parts.unshift(part);
+      const s = parts.join(' > ');
+      if (role === 'answers' ? cls.length : document.querySelectorAll(s).length === 1) return s;
+    }
+    return parts.join(' > ');
+  }
+  function pick(role) {
+    return new Promise((resolve) => {
+      const box = document.createElement('div');
+      box.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;border:2px solid #f0f;background:rgba(255,0,255,.12);transition:all .05s';
+      const tip = document.createElement('div');
+      tip.textContent = `Bolchak: click the ${role === 'answers' ? 'AI REPLY text (any reply)' : role.toUpperCase() + ' element'} — Esc to cancel`;
+      tip.style.cssText = 'position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#f0f;color:#fff;padding:6px 10px;border-radius:6px;font:14px sans-serif;pointer-events:none';
+      document.body.append(box, tip);
+      let target = null;
+      const move = (e) => { target = e.target; const r = target.getBoundingClientRect(); Object.assign(box.style, { left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px' }); };
+      const done = (val) => { removeEventListener('mousemove', move, true); removeEventListener('click', click, true); removeEventListener('keydown', key, true); box.remove(); tip.remove(); resolve(val); };
+      const click = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        let el = target;
+        if (role === 'send' || role === 'stop') el = el.closest('button,[role="button"]') || el;
+        if (role === 'input') el = el.closest('textarea,[contenteditable="true"]') || el;
+        done(selectorFor(el, role));
+      };
+      const key = (e) => { if (e.key === 'Escape') done(null); };
+      addEventListener('mousemove', move, true); addEventListener('click', click, true); addEventListener('keydown', key, true);
+    });
+  }
+
   // ---------- Message handler ----------
   chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     if (msg.type === 'ping') { reply({ ok: true, site }); return; }
+    if (msg.type === 'pick') {
+      pick(msg.role).then((s) => {
+        if (s) { custom[msg.role] = s; chrome.storage.local.set({ ['custom_' + site]: custom }); }
+        reply({ ok: !!s, selector: s, count: s ? document.querySelectorAll(s).length : 0 });
+      });
+      return true;
+    }
+    if (msg.type === 'test') {
+      const r = {}; for (const k of ['input', 'send', 'stop']) r[k] = !!q(sel(k));
+      r.answers = answerNodes().length; reply(r); return;
+    }
     if (msg.type === 'readLast') {
       const n = lastAnswer(); reply({ ok: !!n, text: n ? htmlToMarkdown(n).trim() : '' }); return;
     }

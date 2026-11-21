@@ -17,3 +17,12 @@ Stops when both AIs end consecutive replies with the consensus marker (default `
 
 ## If a site changes its UI
 Selectors live in the `SITES` object at the top of `extension/content.js`.
+
+## Custom elements (manual fallback)
+If a button or box isn't detected, open **Custom elements** in the side panel. For each AI:
+- **Paste box** – where text is inserted
+- **Send btn** – button clicked to send (if missing, Enter is pressed)
+- **Stop btn** – visible while the AI is generating (optional; text-stability is also used)
+- **Copy from** – click any AI *reply*; the selector is generalized to match all replies, and the last one is copied
+
+Click **Pick**, then click the element on the page (it's highlighted pink; Esc cancels). Selectors are saved and can be hand-edited. **Test** shows what is currently detected.

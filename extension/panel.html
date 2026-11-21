@@ -16,6 +16,9 @@
   .msg b { display: block; }
   .chatgpt b { color: #10a37f; } .deepseek b { color: #4d6bfe; }
   details summary { cursor: pointer; margin-top: 8px; font-weight: 600; }
+.pk { border:1px solid #ddd; border-radius:4px; padding:6px; margin-top:6px }
+  .pk .r { display:flex; gap:4px; align-items:center; margin-top:4px } .pk .r span { width:60px }
+  .pk .r input { flex:1 } .pk .r button { margin:0; padding:3px 6px; flex:none }
 </style>
 </head>
 <body>
@@ -42,6 +45,12 @@
     <label>Conclusion marker</label>
     <input id="marker">
     <button id="reset">Reset prompts to defaults</button>
+  </details>
+
+  <details>
+    <summary>Custom elements (if auto-detect fails)</summary>
+    <small>Click "Pick", then click the element in that AI's tab. Selectors can also be typed/edited; blank = auto.</small>
+    <div id="pickers"></div>
   </details>
 
   <div class="row">
