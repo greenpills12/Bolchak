@@ -5,7 +5,7 @@ Chrome/Edge (Manifest V3) extension that makes **ChatGPT** and **DeepSeek** crit
 ## Install
 1. `chrome://extensions` → enable **Developer mode** → **Load unpacked** → select the `extension/` folder.
 2. Open `https://chatgpt.com` and `https://chat.deepseek.com` (logged in). Put them in **separate windows** so both stay "visible" and keep streaming.
-3. Click the extension icon → side panel opens.
+3. Click the extension icon → a chat-style side panel opens. Type a topic and press Enter.
 
 ## Use
 Type a topic, pick who starts, press **Start**. Each turn the extension:
@@ -34,3 +34,11 @@ Click **Pick**, then click the element on the page (it's highlighted pink; Esc c
 4. **Read** the reply as Markdown + LaTeX and relay it. A failed turn is retried once, and the latest reply is recovered if it exists.
 
 Works with both AIs in the **same window** (each tab is brought to the front during its turn) or in **two windows**. "Safety cap" (minutes, 0 = off) is only a last resort. Open **Step log** in the panel to see exactly which step failed.
+
+## Chat interface
+The side panel works like an AI chat app. The debate appears as chat bubbles, with Markdown, LaTeX (KaTeX) and tables rendered. Each message has **Copy** and **Raw** buttons. Typing while a debate is running sends your message as a *moderator note* attached to the next relay. ⚙ holds the settings, prompts, element pickers and step log; ＋ starts a new chat; ⇩ exports the transcript.
+
+## Copying via the site's own Copy button
+When a reply finishes, the extension clicks that reply's **Copy** button. A small page hook (`hook.js`) captures the exact text the site copies (its own Markdown + LaTeX) without touching your clipboard. If there's no Copy button, it falls back to reading the page. Each bubble shows which path was used ("via Copy button" / "via page"). If the button isn't found, mark it as **Copy btn** under Custom elements.
+
+Everything runs locally in your browser using your logged-in sessions. No server, API key, or Cloudflare Worker is needed.

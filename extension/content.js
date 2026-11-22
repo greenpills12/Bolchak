@@ -13,6 +13,7 @@
       stop: ['[data-testid="stop-button"]', 'button[aria-label*="Stop"]'],
       answers: '[data-message-author-role="assistant"]',
       // Appear under a reply only after it has finished streaming.
+      copy: ['[data-testid="copy-turn-action-button"]', 'button[aria-label="Copy"]'],
       doneMarks: ['[data-testid="copy-turn-action-button"]', 'button[aria-label="Copy"]', '[data-testid="good-response-turn-action-button"]'],
       fallbackAnswers: '[data-testid^="conversation-turn"] .markdown, .markdown',
       answerBody: '.markdown',
@@ -23,7 +24,8 @@
       stop: ['div[role="button"]:has(rect)', '[class*="stop"]'],
       answers: '.ds-markdown',
       answerBody: null,
-      doneMarks: ['.ds-flex [role="button"] svg', '[class*="copy"]'],
+      copy: ['.ds-icon-button', '[class*="copy"]', 'div[role="button"]:has(svg)'],
+      doneMarks: ['.ds-icon-button', '.ds-flex [role="button"] svg', '[class*="copy"]'],
       // R1 "thinking" blocks also use .ds-markdown; exclude them (only if something remains).
       exclude: '.ds-think-content, [class*="think-content"], [class*="thinking"]',
     },
@@ -126,6 +128,38 @@
   // Done = a NEW reply exists, the Stop button is gone, and either the reply's
   // action buttons (Copy etc.) appeared after it, or the DOM went quiet briefly.
   let watcher = null;
+  function turnOf(node) {
+    return node.closest('[data-testid^="conversation-turn"], article') || node.parentElement?.parentElement || node;
+  }
+  function firstAfter(node, role) {
+    const turn = turnOf(node);
+    for (const s of sel(role)) {
+      try {
+        const m = [...document.querySelectorAll(s)].find((m) => turn.contains(m) && (node.compareDocumentPosition(m) & Node.DOCUMENT_POSITION_FOLLOWING));
+        if (m) return m.closest('button,[role="button"]') || m;
+      } catch {}
+    }
+    return null;
+  }
+  // Click the site's own Copy button under the latest reply and capture the text.
+  let lastCopied = null;
+  window.addEventListener('message', (e) => { if (e.source === window && e.data?.__bolchakCopy) lastCopied = e.data.__bolchakCopy; });
+  async function copyViaButton(node) {
+    const btn = firstAfter(node, 'copy');
+    if (!btn) return null;
+    lastCopied = null; btn.click();
+    for (let i = 0; i < 20 && lastCopied == null; i++) await sleep(100);
+    return lastCopied && lastCopied.trim().length > 0 ? lastCopied.trim() : null;
+  }
+  async function readBest() {
+    const node = lastAnswer();
+    if (!node) return { ok: false, error: 'No reply element found (Settings → Custom elements → Copy from)' };
+    const dom = htmlToMarkdown(node).replace(/\n{3,}/g, '\n\n').trim();
+    const copied = await copyViaButton(node).catch(() => null);
+    // Sanity check: the copied text should resemble this reply (guards against copying an older one).
+    if (copied && copied.length > dom.length * 0.5) return { ok: true, text: copied, via: 'copy button' };
+    return { ok: true, text: dom, via: 'page' };
+  }
   function doneMarkAfter(node) {
     const turn = node.closest('[data-testid^="conversation-turn"], article') || node.parentElement?.parentElement || node;
     for (const s of sel('doneMarks')) {
@@ -147,8 +181,10 @@
       if (!isNew || gen || !node.innerText.trim()) return;
       if (doneMarkAfter(node) || fromQuiet) {
         finished = true; stop();
-        const text = htmlToMarkdown(node).replace(/\n{3,}/g, '\n\n').trim();
-        chrome.runtime.sendMessage({ type: 'replyDone', site, text, via: fromQuiet ? 'quiet' : 'done-buttons', sawGen }).catch(() => {});
+        setTimeout(async () => {   // let action buttons render, then copy
+          const r = await readBest();
+          chrome.runtime.sendMessage({ type: 'replyDone', site, text: r.text, via: (fromQuiet ? 'quiet' : 'done') + ' / ' + r.via, sawGen }).catch(() => {});
+        }, 400);
       }
     };
     const mo = new MutationObserver(() => {
@@ -299,10 +335,6 @@
       send(msg.enterOnly).then(() => reply({ ok: true })).catch((e) => reply({ ok: false, error: String(e.message || e) }));
       return true;
     }
-    if (msg.type === 'read') {
-      const n = lastAnswer();
-      reply(n ? { ok: true, text: htmlToMarkdown(n).replace(/\n{3,}/g, '\n\n').trim() } : { ok: false, error: 'No reply element found (use Custom elements → Copy from)' });
-      return;
-    }
+    if (msg.type === 'read') { readBest().then(reply); return true; }
   });
 })();

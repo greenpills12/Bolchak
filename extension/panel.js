@@ -17,7 +17,7 @@ TOPIC:`,
 };
 
 const $ = (id) => document.getElementById(id);
-const fields = ['topic', 'first', 'maxTurns', 'timeout', 'stable', 'opening', 'prefix', 'suffix', 'marker'];
+const fields = ['first', 'maxTurns', 'timeout', 'stable', 'opening', 'prefix', 'suffix', 'marker'];
 let running = false, transcript = [];
 
 // ---- persist settings ----
@@ -29,15 +29,50 @@ $('focusTab').addEventListener('change', () => chrome.storage.local.set({ focusT
 fields.forEach((f) => $(f).addEventListener('change', () => chrome.storage.local.set({ [f]: $(f).value })));
 $('reset').onclick = () => { for (const k of ['opening', 'prefix', 'suffix', 'marker']) $(k).value = DEFAULTS[k]; chrome.storage.local.set(DEFAULTS); };
 
-const status = (t) => ($('status').textContent = t);
-function log(who, text) {
-  transcript.push({ who, text });
-  const d = document.createElement('div');
-  d.className = 'msg ' + who;
-  d.innerHTML = `<b>${NAMES[who] || who}</b>`;
-  d.append(document.createTextNode(text));
-  $('log').append(d); $('log').scrollTop = 1e9;
+// ---------- Chat UI ----------
+const AV = { chatgpt: 'G', deepseek: 'D' };
+let turnNo = 0, typingEl = null, lastVia = '', pendingNotes = [];
+const chat = $('log');
+const scrollDown = () => { chat.scrollTop = chat.scrollHeight; };
+function status(t, err) {
+  if (typingEl && !err) { typingEl.querySelector('.step').textContent = t; return; }
+  $('status').textContent = t || ''; $('status').className = err ? 'err' : '';
 }
+function addEl(cls, html) {
+  $('empty')?.remove();
+  const d = document.createElement('div'); d.className = 'msg ' + cls; d.innerHTML = html;
+  chat.append(d); scrollDown(); return d;
+}
+function showTyping(ai) {
+  hideTyping();
+  typingEl = addEl(ai + ' typing', `<div class="av">${AV[ai]}</div><div class="col">
+    <div class="name">${NAMES[ai]}</div><div><span class="dots"><span></span><span></span><span></span></span><span class="step"></span></div></div>`);
+}
+function hideTyping() { typingEl?.remove(); typingEl = null; }
+function log(who, text, note) {
+  transcript.push({ who, text });
+  if (who === 'user') {
+    const d = addEl('user', `<div class="col">${note ? `<div class="tag">${note}</div>` : ''}<div class="bubble"></div></div>`);
+    d.querySelector('.col').style.display = 'flex'; d.querySelector('.col').style.flexDirection = 'column'; d.querySelector('.col').style.alignItems = 'flex-end';
+    d.querySelector('.bubble').textContent = text; return;
+  }
+  hideTyping();
+  const marker = $('marker').value.trim() || DEFAULTS.marker;
+  const d = addEl(who + (text.includes(marker) ? ' agree' : ''), `<div class="av">${AV[who]}</div><div class="col">
+    <div class="name">${NAMES[who]} <span class="meta">turn ${++turnNo}${lastVia ? ' · ' + lastVia : ''}</span></div>
+    <div class="md"></div>
+    <div class="actions"><button data-a="copy">⧉ Copy</button><button data-a="raw">{ } Raw</button></div></div>`);
+  const md = d.querySelector('.md');
+  md.innerHTML = renderMarkdown(text);
+  d.querySelector('[data-a=copy]').onclick = (e) => { navigator.clipboard.writeText(text); e.target.textContent = '✓ Copied'; setTimeout(() => (e.target.textContent = '⧉ Copy'), 1200); };
+  d.querySelector('[data-a=raw]').onclick = (e) => {
+    const raw = md.classList.toggle('raw');
+    if (raw) md.textContent = text; else md.innerHTML = renderMarkdown(text);
+    e.target.textContent = raw ? '◎ Rendered' : '{ } Raw';
+  };
+}
+function sysNote(t) { hideTyping(); addEl('system', t); }
+
 const fill = (tpl, other, marker) => (tpl || '').replaceAll('{other}', NAMES[other]).replaceAll('{marker}', marker);
 
 async function findTab(ai) {
@@ -45,7 +80,10 @@ async function findTab(ai) {
   if (!tabs.length) throw new Error(`No ${NAMES[ai]} tab open`);
   const tab = tabs.find((t) => t.active) || tabs[0];
   try { await chrome.tabs.sendMessage(tab.id, { type: 'ping' }); }
-  catch { await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }); }
+  catch {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['hook.js'], world: 'MAIN' }).catch(() => {});
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+  }
   return tab.id;
 }
 
@@ -123,13 +161,13 @@ async function ask(ai, text, timeoutMs) {
     }, 20000);
     if (timeoutMs > 0) cap = setTimeout(() => finish({ text: null, via: 'safety cap' }), timeoutMs);
   });
-  if (done.text) { dbg(`${NAMES[ai]}: reply complete (${done.via}), ${done.text.length} chars`); return done.text; }
+  if (done.text) { lastVia = done.via.includes('copy button') ? 'via Copy button' : 'via page'; dbg(`${NAMES[ai]}: reply complete (${done.via}), ${done.text.length} chars`); return done.text; }
   dbg(`${NAMES[ai]}: safety cap reached — reading what exists`);
 
   // STEP 4: read (retry, page may be re-rendering)
   for (let i = 0; i < 4; i++) {
     const r = await msg(ai, { type: 'read' });
-    if (r.ok && r.text) { dbg(`${NAMES[ai]}: read ${r.text.length} chars`); return r.text; }
+    if (r.ok && r.text) { lastVia = r.via === 'copy button' ? 'via Copy button' : 'via page'; dbg(`${NAMES[ai]}: read ${r.text.length} chars`); return r.text; }
     dbg(`${NAMES[ai]}: read failed (${r.error}), retry`); await sleep(1500);
   }
   throw new Error(`${NAMES[ai]}: reply not found — set "Copy from" in Custom elements`);
@@ -151,66 +189,76 @@ async function waitIdle(ai, timeoutMs) {
   dbg(`${NAMES[ai]}: timeout while generating — reading what exists`);
 }
 
-$('start').onclick = async () => {
-  const topic = $('topic').value.trim();
-  if (!topic) return status('Enter a topic first.');
-  running = true; transcript = []; $('log').innerHTML = '';
-  $('start').disabled = true; $('stop').disabled = false;
+async function startDebate(topic) {
+  running = true; transcript = []; turnNo = 0; pendingNotes = [];
+  chat.innerHTML = ''; $('debug').innerHTML = ''; status('');
+  $('start').hidden = true; $('stop').hidden = false;
   const marker = $('marker').value.trim() || DEFAULTS.marker;
   const maxTurns = +$('maxTurns').value || 8;
   const timeoutMs = (+$('timeout').value || 0) * 60000;
   let cur = $('first').value, other = cur === 'chatgpt' ? 'deepseek' : 'chatgpt';
   const agreed = { chatgpt: false, deepseek: false };
-
+  log('user', topic, 'Topic');
   try {
-    await findTab('chatgpt'); await findTab('deepseek'); $('debug').innerHTML = '';
-    log('user', topic);
+    await findTab('chatgpt'); await findTab('deepseek');
     let message = `${fill($('opening').value, other, marker)}\n${topic}`.trim();
 
     for (let turn = 1; turn <= maxTurns && running; turn++) {
-      status(`Turn ${turn}/${maxTurns}: waiting for ${NAMES[cur]}…`);
+      showTyping(cur); status('pasting & sending…');
       let answer;
       for (let attempt = 1; ; attempt++) {
         try { answer = await ask(cur, message, timeoutMs); break; }
         catch (e) {
           if (!running || attempt >= 2) throw e;
-          dbg(`Turn failed: ${e.message}. Trying to recover by reading the latest reply…`);
+          dbg(`Turn failed: ${e.message}. Recovering latest reply…`);
           const r = await msg(cur, { type: 'read' }).catch(() => null);
-          if (r?.ok && r.text && r.text !== transcript.at(-1)?.text) { answer = r.text; break; }
-          dbg('Re-sending the message…');
+          if (r?.ok && r.text && r.text !== transcript.at(-1)?.text) { lastVia = 'recovered'; answer = r.text; break; }
+          dbg('Re-sending…'); status('retrying…');
         }
       }
       if (!running) break;
       log(cur, answer);
 
       agreed[cur] = answer.includes(marker);
-      if (agreed[cur] && agreed[other]) { status(`✅ Consensus reached after ${turn} turns.`); break; }
+      if (agreed[cur] && agreed[other]) { sysNote(`✅ Consensus reached after ${turn} turns`); break; }
 
-      // relay: prefix + answer + suffix -> other AI
       const pre = fill($('prefix').value, cur, marker), suf = fill($('suffix').value, cur, marker);
-      message = [pre, answer, suf].filter(Boolean).join('\n\n');
+      const notes = pendingNotes.splice(0).map((n) => `[Moderator note from the user]: ${n}`).join('\n');
+      message = [pre, answer, suf, notes].filter(Boolean).join('\n\n');
       [cur, other] = [other, cur];
-      if (turn === maxTurns) status(`Stopped: reached max turns (${maxTurns}).`);
+      if (turn === maxTurns) sysNote(`Reached max turns (${maxTurns}) without full consensus`);
     }
-    if (!running) status('Stopped by user.');
+    if (!running) sysNote('Stopped');
   } catch (e) {
-    status('Error: ' + e.message);
+    hideTyping(); if (e.message !== 'Stopped') { sysNote('⚠ ' + e.message); status('Open ⚙ → Step log for details', true); } else sysNote('Stopped');
   } finally {
-    running = false; $('start').disabled = false; $('stop').disabled = true;
+    running = false; hideTyping(); $('start').hidden = false; $('stop').hidden = true;
   }
-};
+}
 
-$('stop').onclick = () => { running = false; status('Stopping…'); };
+function submit() {
+  const t = $('topic').value.trim(); if (!t) return;
+  $('topic').value = ''; autoGrow();
+  if (running) { pendingNotes.push(t); log('user', t, 'Moderator — sent with next relay'); return; }
+  startDebate(t);
+}
+$('start').onclick = submit;
+$('topic').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); } });
+const autoGrow = () => { const t = $('topic'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 160) + 'px'; };
+$('topic').addEventListener('input', autoGrow);
+$('stop').onclick = () => { running = false; status('stopping…'); };
+$('settingsBtn').onclick = () => { $('settings').hidden = !$('settings').hidden; };
+$('newChat').onclick = () => { if (running) return; transcript = []; location.reload(); };
 
 $('export').onclick = () => {
-  const md = transcript.map((m) => `## ${NAMES[m.who] || 'Topic'}\n\n${m.text}\n`).join('\n');
+  const md = transcript.map((m) => `## ${NAMES[m.who] || 'You'}\n\n${m.text}\n`).join('\n');
   const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
   chrome.downloads ? chrome.downloads.download({ url, filename: 'bolchak-debate.md' })
     : Object.assign(document.createElement('a'), { href: url, download: 'bolchak-debate.md' }).click();
 };
 
 // ---- Custom element picker UI ----
-const ROLES = { input: 'Paste box', send: 'Send btn', stop: 'Stop btn', answers: 'Copy from', doneMarks: 'Done mark' };
+const ROLES = { input: 'Paste box', send: 'Send btn', stop: 'Stop btn', answers: 'Reply area', copy: 'Copy btn', doneMarks: 'Done mark' };
 function buildPickers() {
   const root = $('pickers'); root.innerHTML = '';
   for (const ai of ['chatgpt', 'deepseek']) {

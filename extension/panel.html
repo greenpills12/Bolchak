@@ -2,67 +2,66 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bolchak</title>
-<style>
-  body { font: 13px system-ui, sans-serif; margin: 10px; color: #222; }
-  label { display: block; margin-top: 8px; font-weight: 600; }
-  textarea, input, select { width: 100%; box-sizing: border-box; font: inherit; padding: 4px; }
-  textarea { resize: vertical; }
-  .row { display: flex; gap: 6px; } .row > * { flex: 1; }
-  button { margin-top: 8px; padding: 6px; cursor: pointer; }
-  #status { margin-top: 8px; padding: 6px; background: #f2f2f2; border-radius: 4px; }
-  #log { margin-top: 8px; max-height: 45vh; overflow: auto; border: 1px solid #ddd; border-radius: 4px; }
-  .msg { padding: 6px; border-bottom: 1px solid #eee; white-space: pre-wrap; }
-  .msg b { display: block; }
-  .chatgpt b { color: #10a37f; } .deepseek b { color: #4d6bfe; }
-  details summary { cursor: pointer; margin-top: 8px; font-weight: 600; }
-.pk { border:1px solid #ddd; border-radius:4px; padding:6px; margin-top:6px }
-  .pk .r { display:flex; gap:4px; align-items:center; margin-top:4px } .pk .r span { width:60px }
-  .pk .r input { flex:1 } .pk .r button { margin:0; padding:3px 6px; flex:none }
-</style>
+<link rel="stylesheet" href="lib/katex.min.css">
+<link rel="stylesheet" href="panel.css">
 </head>
 <body>
-  <h3 style="margin:0">Bolchak — AI ↔ AI Debate</h3>
-  <small>Open chatgpt.com and chat.deepseek.com (logged in) in tabs, ideally in separate windows.</small>
+  <header>
+    <div class="brand"><span class="logo">⇄</span> Bolchak <span class="sub">ChatGPT × DeepSeek</span></div>
+    <div class="hbtns">
+      <button id="newChat" class="icon" title="New chat">＋</button>
+      <button id="export" class="icon" title="Export transcript (.md)">⇩</button>
+      <button id="settingsBtn" class="icon" title="Settings">⚙</button>
+    </div>
+  </header>
 
-  <label>Topic / question</label>
-  <textarea id="topic" rows="3" placeholder="e.g. Prove or disprove: every bounded monotone sequence converges"></textarea>
+  <!-- Settings drawer -->
+  <aside id="settings" hidden>
+    <div class="grid">
+      <label>Starts<select id="first"><option value="chatgpt">ChatGPT</option><option value="deepseek">DeepSeek</option></select></label>
+      <label>Max turns<input id="maxTurns" type="number" value="8" min="1"></label>
+      <label>Safety cap (min, 0=off)<input id="timeout" type="number" value="0" min="0"></label>
+      <label>Quiet fallback (s)<input id="stable" type="number" value="3" min="1"></label>
+    </div>
+    <label class="check"><input type="checkbox" id="focusTab" checked> Bring each AI's tab to front on its turn</label>
+    <details><summary>System prompts</summary>
+      <label>Opening (first turn, before topic)<textarea id="opening" rows="5"></textarea></label>
+      <label>Prefix (before each relayed answer)<textarea id="prefix" rows="4"></textarea></label>
+      <label>Suffix (after each relayed answer)<textarea id="suffix" rows="4"></textarea></label>
+      <label>Consensus marker<input id="marker"></label>
+      <button id="reset" class="ghost">Reset prompts</button>
+    </details>
+    <details><summary>Custom elements (if auto-detect fails)</summary>
+      <small>Click Pick, then click the element in that AI's tab. Blank = auto.</small>
+      <div id="pickers"></div>
+    </details>
+    <details><summary>Step log</summary><div id="debug"></div></details>
+  </aside>
 
-  <div class="row">
-    <div><label>Starts</label><select id="first"><option value="chatgpt">ChatGPT</option><option value="deepseek">DeepSeek</option></select></div>
-    <div><label>Max turns</label><input id="maxTurns" type="number" value="8" min="1"></div>
-    <div><label>Safety cap (min, 0=off)</label><input id="timeout" type="number" value="0" min="0"></div>
-    <div><label>Quiet fallback (s)</label><input id="stable" type="number" value="3" min="1"></div>
-  </div>
-  <label style="font-weight:normal"><input type="checkbox" id="focusTab" checked style="width:auto"> Bring each AI's tab to front during its turn (prevents background-tab stalls)</label>
+  <main id="log">
+    <div id="empty">
+      <div class="logo big">⇄</div>
+      <h2>Start a debate</h2>
+      <p>Open <b>chatgpt.com</b> and <b>chat.deepseek.com</b> (logged in), then type a topic below.
+      They'll critique each other until they agree.</p>
+    </div>
+  </main>
 
-  <details>
-    <summary>System prompts (optional)</summary>
-    <label>Opening prompt (sent with the topic, first turn only)</label>
-    <textarea id="opening" rows="4"></textarea>
-    <label>Prefix (inserted at START of each relayed answer)</label>
-    <textarea id="prefix" rows="4"></textarea>
-    <label>Suffix (inserted at END of each relayed answer)</label>
-    <textarea id="suffix" rows="4"></textarea>
-    <label>Conclusion marker</label>
-    <input id="marker">
-    <button id="reset">Reset prompts to defaults</button>
-  </details>
+  <footer>
+    <div id="status"></div>
+    <div class="composer">
+      <textarea id="topic" rows="1" placeholder="Ask a topic to debate…"></textarea>
+      <button id="start" class="send" title="Send (Enter)">↑</button>
+      <button id="stop" class="send stop" title="Stop" hidden>■</button>
+    </div>
+    <small class="hint">Enter to send · Shift+Enter for newline · while running, your message is injected as moderator input</small>
+  </footer>
 
-  <details>
-    <summary>Custom elements (if auto-detect fails)</summary>
-    <small>Click "Pick", then click the element in that AI's tab. Selectors can also be typed/edited; blank = auto.</small>
-    <div id="pickers"></div>
-  </details>
-
-  <div class="row">
-    <button id="start">▶ Start</button>
-    <button id="stop" disabled>■ Stop</button>
-    <button id="export">⬇ Export .md</button>
-  </div>
-  <div id="status">Idle</div>
-  <div id="log"></div>
-  <details><summary>Step log (debug)</summary><div id="debug" style="max-height:25vh;overflow:auto;font:11px monospace"></div></details>
+  <script src="lib/marked.min.js"></script>
+  <script src="lib/katex.min.js"></script>
+  <script src="render.js"></script>
   <script src="panel.js"></script>
 </body>
 </html>
