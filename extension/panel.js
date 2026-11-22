@@ -17,13 +17,15 @@ TOPIC:`,
 };
 
 const $ = (id) => document.getElementById(id);
-const fields = ['topic', 'first', 'maxTurns', 'timeout', 'opening', 'prefix', 'suffix', 'marker'];
+const fields = ['topic', 'first', 'maxTurns', 'timeout', 'stable', 'opening', 'prefix', 'suffix', 'marker'];
 let running = false, transcript = [];
 
 // ---- persist settings ----
-chrome.storage.local.get(fields, (s) => {
+chrome.storage.local.get([...fields, 'focusTab'], (s) => {
   for (const f of fields) $(f).value = s[f] ?? DEFAULTS[f] ?? $(f).value;
+  if (s.focusTab != null) $('focusTab').checked = s.focusTab;
 });
+$('focusTab').addEventListener('change', () => chrome.storage.local.set({ focusTab: $('focusTab').checked }));
 fields.forEach((f) => $(f).addEventListener('change', () => chrome.storage.local.set({ [f]: $(f).value })));
 $('reset').onclick = () => { for (const k of ['opening', 'prefix', 'suffix', 'marker']) $(k).value = DEFAULTS[k]; chrome.storage.local.set(DEFAULTS); };
 
@@ -47,10 +49,106 @@ async function findTab(ai) {
   return tab.id;
 }
 
-async function ask(tabId, text, timeoutMs) {
-  const r = await chrome.tabs.sendMessage(tabId, { type: 'ask', text, timeoutMs });
-  if (!r?.ok) throw new Error(r?.error || 'No response from tab');
-  return r.text;
+// ---------- Turn protocol ----------
+// Every step is a short message + verification, so a dropped channel or
+// re-rendered page only costs one retry instead of killing the run.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function dbg(t) {
+  const d = document.createElement('div'); d.className = 'dbg';
+  d.textContent = new Date().toLocaleTimeString() + '  ' + t;
+  $('debug').prepend(d);
+}
+async function msg(ai, m, tries = 3) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const tabId = await findTab(ai);              // re-finds + re-injects each time
+      return await chrome.tabs.sendMessage(tabId, m);
+    } catch (e) { dbg(`${NAMES[ai]}: ${m.type} failed (${e.message}), retry ${i + 1}`); await sleep(1500); }
+  }
+  throw new Error(`${NAMES[ai]} tab not responding to "${m.type}"`);
+}
+async function focusTab(ai) {
+  if (!$('focusTab').checked) return;
+  const tabId = await findTab(ai), tab = await chrome.tabs.get(tabId);
+  await chrome.tabs.update(tabId, { active: true });
+  await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+}
+
+async function ask(ai, text, timeoutMs) {
+  await focusTab(ai);
+  const before = await msg(ai, { type: 'state' });
+  if (!before.inputFound) throw new Error(`${NAMES[ai]}: paste box not found — set it in Custom elements`);
+  if (before.generating) { dbg(`${NAMES[ai]} still generating; waiting first`); await waitIdle(ai, timeoutMs); }
+  const base = await msg(ai, { type: 'state' });
+
+  // STEP 1: insert + verify
+  let ins;
+  for (let i = 0; i < 3; i++) {
+    ins = await msg(ai, { type: 'insert', text });
+    if (ins.ok && ins.inputLen >= Math.min(20, text.trim().length)) break;
+    dbg(`${NAMES[ai]}: insert not confirmed (${ins.error || 'box empty'}), retry`); await sleep(1000);
+  }
+  if (!ins.ok || !ins.inputLen) throw new Error(`${NAMES[ai]}: could not paste text`);
+  dbg(`${NAMES[ai]}: pasted ${text.length} chars`);
+
+  // STEP 2: send + verify that something started (box cleared / generating / new reply)
+  let started = false;
+  for (let i = 0; i < 4 && !started; i++) {
+    await msg(ai, { type: 'send', enterOnly: i % 2 === 1 });
+    for (let k = 0; k < 10 && !started; k++) {
+      await sleep(500);
+      const s = await msg(ai, { type: 'state' });
+      started = s.generating || s.count > base.count || s.inputLen === 0;
+    }
+    if (!started) dbg(`${NAMES[ai]}: send not confirmed, retry (${i % 2 ? 'button' : 'Enter key'})`);
+  }
+  if (!started) throw new Error(`${NAMES[ai]}: message did not send — set Send btn in Custom elements`);
+  dbg(`${NAMES[ai]}: sent, waiting for reply`);
+
+  // STEP 3: event-driven — content script pushes 'replyDone' the moment it finishes.
+  const tabId = await findTab(ai);
+  const done = await new Promise((resolve, reject) => {
+    let poll, cap;
+    const finish = (v, err) => {
+      chrome.runtime.onMessage.removeListener(onMsg); clearInterval(poll); clearTimeout(cap);
+      err ? reject(err) : resolve(v);
+    };
+    const onMsg = (m, sender) => { if (m.type === 'replyDone' && sender.tab?.id === tabId) finish(m); };
+    chrome.runtime.onMessage.addListener(onMsg);
+    msg(ai, { type: 'watch', base, quietMs: (+$('stable').value || 3) * 1000 }).catch((e) => finish(null, e));
+    // Keep-alive: if the page reloaded (watcher lost) re-arm it; also honour Stop.
+    poll = setInterval(async () => {
+      if (!running) return finish(null, new Error('Stopped'));
+      try { await msg(ai, { type: 'watch', base, quietMs: (+$('stable').value || 3) * 1000, rearm: true }, 1); } catch {}
+    }, 20000);
+    if (timeoutMs > 0) cap = setTimeout(() => finish({ text: null, via: 'safety cap' }), timeoutMs);
+  });
+  if (done.text) { dbg(`${NAMES[ai]}: reply complete (${done.via}), ${done.text.length} chars`); return done.text; }
+  dbg(`${NAMES[ai]}: safety cap reached — reading what exists`);
+
+  // STEP 4: read (retry, page may be re-rendering)
+  for (let i = 0; i < 4; i++) {
+    const r = await msg(ai, { type: 'read' });
+    if (r.ok && r.text) { dbg(`${NAMES[ai]}: read ${r.text.length} chars`); return r.text; }
+    dbg(`${NAMES[ai]}: read failed (${r.error}), retry`); await sleep(1500);
+  }
+  throw new Error(`${NAMES[ai]}: reply not found — set "Copy from" in Custom elements`);
+}
+
+// Used only if a previous reply is still generating before we paste.
+async function waitIdle(ai, timeoutMs) {
+  timeoutMs = timeoutMs || 600000;
+  const stableMs = (+$('stable').value || 3) * 1000, t0 = Date.now();
+  let last = null, since = Date.now();
+  while (Date.now() - t0 < Math.max(timeoutMs, 10000)) {
+    if (!running) throw new Error('Stopped');
+    const s = await msg(ai, { type: 'state' });
+    const sig = s.len + '|' + s.tail;
+    if (sig !== last) { last = sig; since = Date.now(); }
+    if (!s.generating && s.len && Date.now() - since >= stableMs) return;
+    await sleep(1000);
+  }
+  dbg(`${NAMES[ai]}: timeout while generating — reading what exists`);
 }
 
 $('start').onclick = async () => {
@@ -60,18 +158,28 @@ $('start').onclick = async () => {
   $('start').disabled = true; $('stop').disabled = false;
   const marker = $('marker').value.trim() || DEFAULTS.marker;
   const maxTurns = +$('maxTurns').value || 8;
-  const timeoutMs = (+$('timeout').value || 300) * 1000;
+  const timeoutMs = (+$('timeout').value || 0) * 60000;
   let cur = $('first').value, other = cur === 'chatgpt' ? 'deepseek' : 'chatgpt';
   const agreed = { chatgpt: false, deepseek: false };
 
   try {
-    const tabs = { chatgpt: await findTab('chatgpt'), deepseek: await findTab('deepseek') };
+    await findTab('chatgpt'); await findTab('deepseek'); $('debug').innerHTML = '';
     log('user', topic);
     let message = `${fill($('opening').value, other, marker)}\n${topic}`.trim();
 
     for (let turn = 1; turn <= maxTurns && running; turn++) {
       status(`Turn ${turn}/${maxTurns}: waiting for ${NAMES[cur]}…`);
-      const answer = await ask(tabs[cur], message, timeoutMs);
+      let answer;
+      for (let attempt = 1; ; attempt++) {
+        try { answer = await ask(cur, message, timeoutMs); break; }
+        catch (e) {
+          if (!running || attempt >= 2) throw e;
+          dbg(`Turn failed: ${e.message}. Trying to recover by reading the latest reply…`);
+          const r = await msg(cur, { type: 'read' }).catch(() => null);
+          if (r?.ok && r.text && r.text !== transcript.at(-1)?.text) { answer = r.text; break; }
+          dbg('Re-sending the message…');
+        }
+      }
       if (!running) break;
       log(cur, answer);
 
@@ -92,7 +200,7 @@ $('start').onclick = async () => {
   }
 };
 
-$('stop').onclick = () => { running = false; status('Stopping after current reply…'); };
+$('stop').onclick = () => { running = false; status('Stopping…'); };
 
 $('export').onclick = () => {
   const md = transcript.map((m) => `## ${NAMES[m.who] || 'Topic'}\n\n${m.text}\n`).join('\n');
@@ -102,7 +210,7 @@ $('export').onclick = () => {
 };
 
 // ---- Custom element picker UI ----
-const ROLES = { input: 'Paste box', send: 'Send btn', stop: 'Stop btn', answers: 'Copy from' };
+const ROLES = { input: 'Paste box', send: 'Send btn', stop: 'Stop btn', answers: 'Copy from', doneMarks: 'Done mark' };
 function buildPickers() {
   const root = $('pickers'); root.innerHTML = '';
   for (const ai of ['chatgpt', 'deepseek']) {

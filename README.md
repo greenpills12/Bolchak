@@ -26,3 +26,11 @@ If a button or box isn't detected, open **Custom elements** in the side panel. F
 - **Copy from** – click any AI *reply*; the selector is generalized to match all replies, and the last one is copied
 
 Click **Pick**, then click the element on the page (it's highlighted pink; Esc cancels). Selectors are saved and can be hand-edited. **Test** shows what is currently detected.
+
+## How a turn works (protocol)
+1. **Paste** into the AI's box, then check the box actually contains the text (up to 3 retries).
+2. **Send** by clicking the button. If nothing starts, press Enter instead, alternating up to 4 tries.
+3. **Wait for completion (event-driven, no fixed timeout):** the page reports back the moment a *new* reply is finished. Finished means the Stop button is gone **and** the reply's action buttons (Copy etc., settable as "Done mark") appear after it. If there are no such buttons, it waits for the page to go quiet for a few seconds ("Quiet fallback").
+4. **Read** the reply as Markdown + LaTeX and relay it. A failed turn is retried once, and the latest reply is recovered if it exists.
+
+Works with both AIs in the **same window** (each tab is brought to the front during its turn) or in **two windows**. "Safety cap" (minutes, 0 = off) is only a last resort. Open **Step log** in the panel to see exactly which step failed.
