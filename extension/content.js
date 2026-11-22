@@ -12,6 +12,9 @@
       send: ['[data-testid="send-button"]', '#composer-submit-button', 'button[aria-label*="Send"]'],
       stop: ['[data-testid="stop-button"]', 'button[aria-label*="Stop"]'],
       answers: '[data-message-author-role="assistant"]',
+      // Appear under a reply only after it has finished streaming.
+      doneMarks: ['[data-testid="copy-turn-action-button"]', 'button[aria-label="Copy"]', '[data-testid="good-response-turn-action-button"]'],
+      fallbackAnswers: '[data-testid^="conversation-turn"] .markdown, .markdown',
       answerBody: '.markdown',
     },
     deepseek: {
@@ -20,8 +23,9 @@
       stop: ['div[role="button"]:has(rect)', '[class*="stop"]'],
       answers: '.ds-markdown',
       answerBody: null,
-      // R1 "thinking" blocks also use .ds-markdown; exclude them.
-      exclude: '[class*="think"]',
+      doneMarks: ['.ds-flex [role="button"] svg', '[class*="copy"]'],
+      // R1 "thinking" blocks also use .ds-markdown; exclude them (only if something remains).
+      exclude: '.ds-think-content, [class*="think-content"], [class*="thinking"]',
     },
   };
 
@@ -41,7 +45,11 @@
     let nodes = [];
     if (custom.answers) { try { nodes = [...document.querySelectorAll(custom.answers)]; } catch {} }
     if (!nodes.length) nodes = [...document.querySelectorAll(cfg.answers)];
-    if (cfg.exclude && !custom.answers) nodes = nodes.filter((n) => !n.closest(cfg.exclude));
+    if (!nodes.length && cfg.fallbackAnswers) nodes = [...document.querySelectorAll(cfg.fallbackAnswers)];
+    if (cfg.exclude && !custom.answers) {
+      const kept = nodes.filter((n) => !n.closest(cfg.exclude));
+      if (kept.length) nodes = kept;
+    }
     // Drop nested matches (keep outermost)
     nodes = nodes.filter((n) => !nodes.some((o) => o !== n && o.contains(n)));
     return nodes;
@@ -76,39 +84,81 @@
   }
 
   // ---------- 2. SEND ----------
-  async function send() {
+  function pressEnter() {
+    const el = q(sel('input')); if (!el) return;
+    el.focus();
+    for (const type of ['keydown', 'keypress', 'keyup'])
+      el.dispatchEvent(new KeyboardEvent(type, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+  }
+  async function send(enterOnly) {
+    if (enterOnly) { pressEnter(); return; }
     for (let i = 0; i < 20; i++) {
       const btn = q(sel('send'));
       if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') { btn.click(); return; }
       await sleep(250);
     }
     // Fallback: press Enter in the input
-    const el = q(sel('input'));
-    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    pressEnter();
   }
 
   // ---------- 3. WAIT + READ ----------
-  async function waitForReply(prevCount, prevText, timeoutMs) {
-    const start = Date.now();
-    // wait for a new answer to appear
-    while (Date.now() - start < timeoutMs) {
-      const n = answerNodes().length;
-      const t = lastAnswer()?.innerText || '';
-      if (n > prevCount || (t && t !== prevText)) break;
-      await sleep(500);
-    }
-    // wait until generation stops and text is stable for ~3s
-    let last = '', stableSince = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const t = lastAnswer()?.innerText || '';
-      const generating = visible(q(sel('stop')));
-      if (t !== last) { last = t; stableSince = Date.now(); }
-      if (!generating && t && Date.now() - stableSince > 3000) break;
-      await sleep(700);
-    }
+  // Snapshot used by the panel's polling protocol (short messages only).
+  function inputText() {
+    const el = q(sel('input'));
+    return el ? (el.value ?? el.innerText ?? '') : null;
+  }
+  function state() {
     const node = lastAnswer();
-    if (!node) throw new Error('No reply found');
-    return htmlToMarkdown(node).replace(/\n{3,}/g, '\n\n').trim();
+    const raw = node?.innerText || '';
+    return {
+      count: answerNodes().length,
+      len: raw.length,
+      tail: raw.slice(-200),
+      generating: visible(q(sel('stop'))),
+      inputFound: !!q(sel('input')),
+      inputLen: (inputText() || '').trim().length,
+      sendFound: !!q(sel('send')),
+      hidden: document.hidden,
+    };
+  }
+
+  // ---------- Completion watcher (event-driven, pushes 'replyDone') ----------
+  // Done = a NEW reply exists, the Stop button is gone, and either the reply's
+  // action buttons (Copy etc.) appeared after it, or the DOM went quiet briefly.
+  let watcher = null;
+  function doneMarkAfter(node) {
+    const turn = node.closest('[data-testid^="conversation-turn"], article') || node.parentElement?.parentElement || node;
+    for (const s of sel('doneMarks')) {
+      try {
+        const marks = [...document.querySelectorAll(s)];
+        if (marks.some((m) => turn.contains(m) && (node.compareDocumentPosition(m) & Node.DOCUMENT_POSITION_FOLLOWING))) return true;
+      } catch {}
+    }
+    return false;
+  }
+  function watchReply(base, quietMs) {
+    if (watcher) watcher.stop();
+    let quietTimer = null, finished = false, sawGen = false;
+    const check = (fromQuiet) => {
+      if (finished) return;
+      const node = lastAnswer(); if (!node) return;
+      const isNew = answerNodes().length > base.count || node.innerText.slice(-200) !== base.tail;
+      const gen = visible(q(sel('stop'))); if (gen) sawGen = true;
+      if (!isNew || gen || !node.innerText.trim()) return;
+      if (doneMarkAfter(node) || fromQuiet) {
+        finished = true; stop();
+        const text = htmlToMarkdown(node).replace(/\n{3,}/g, '\n\n').trim();
+        chrome.runtime.sendMessage({ type: 'replyDone', site, text, via: fromQuiet ? 'quiet' : 'done-buttons', sawGen }).catch(() => {});
+      }
+    };
+    const mo = new MutationObserver(() => {
+      check(false);
+      clearTimeout(quietTimer); quietTimer = setTimeout(() => check(true), quietMs);
+    });
+    mo.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true });
+    const stop = () => { mo.disconnect(); clearTimeout(quietTimer); watcher = null; };
+    watcher = { stop };
+    quietTimer = setTimeout(() => check(true), quietMs);
   }
 
   // ---------- Lossless DOM -> Markdown (keeps LaTeX, code, tables) ----------
@@ -237,18 +287,22 @@
     if (msg.type === 'readLast') {
       const n = lastAnswer(); reply({ ok: !!n, text: n ? htmlToMarkdown(n).trim() : '' }); return;
     }
-    if (msg.type === 'ask') {
-      (async () => {
-        try {
-          const prevCount = answerNodes().length;
-          const prevText = lastAnswer()?.innerText || '';
-          await insertText(msg.text);
-          await send();
-          const text = await waitForReply(prevCount, prevText, msg.timeoutMs || 300000);
-          reply({ ok: true, text });
-        } catch (e) { reply({ ok: false, error: String(e.message || e) }); }
-      })();
-      return true; // async
+    if (msg.type === 'state') { reply(state()); return; }
+    if (msg.type === 'watch') { if (msg.rearm && watcher) { reply({ ok: true }); return; } watchReply(msg.base, msg.quietMs || 2500); reply({ ok: true }); return; }
+    if (msg.type === 'unwatch') { watcher?.stop(); reply({ ok: true }); return; }
+    if (msg.type === 'insert') {
+      insertText(msg.text).then(() => reply({ ok: true, ...state() }))
+        .catch((e) => reply({ ok: false, error: String(e.message || e) }));
+      return true;
+    }
+    if (msg.type === 'send') {
+      send(msg.enterOnly).then(() => reply({ ok: true })).catch((e) => reply({ ok: false, error: String(e.message || e) }));
+      return true;
+    }
+    if (msg.type === 'read') {
+      const n = lastAnswer();
+      reply(n ? { ok: true, text: htmlToMarkdown(n).replace(/\n{3,}/g, '\n\n').trim() } : { ok: false, error: 'No reply element found (use Custom elements → Copy from)' });
+      return;
     }
   });
 })();
